@@ -1,8 +1,10 @@
 import asyncio
 import json
 import logging
+import os
 import re
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 
@@ -24,15 +26,28 @@ API_URL = "https://tourvisor.ru/api/v1.1"
 SEARCH_URL = "https://search3.tourvisor.ru"
 REFERRER = "https://eto.travel/search/"
 
+# Путь к файлу справочника (можно переопределить через переменную окружения)
+DICTIONARY_FILE = os.getenv("DICTIONARY_FILE", "travel-dictionary.json")
+
 
 class EtoTravelMCP:
     """MCP сервер для работы с eto.travel API"""
     
-    def __init__(self):
+    def __init__(self, dictionary_path: Optional[str] = None):
         self.server = Server("eto-travel-mcp")
         self.session: Optional[str] = None
         self.dictionary: Dict[str, Any] = {}
         self.http_client = httpx.AsyncClient(timeout=30.0)
+        
+        # Определяем путь к файлу справочника
+        if dictionary_path:
+            self.dictionary_path = Path(dictionary_path)
+        else:
+            # Ищем файл рядом со скриптом
+            script_dir = Path(__file__).parent
+            self.dictionary_path = script_dir / DICTIONARY_FILE
+        
+        logger.info(f"📂 Путь к справочнику: {self.dictionary_path}")
         
         # Регистрируем инструменты
         self.setup_tools()
@@ -48,7 +63,13 @@ class EtoTravelMCP:
                     description="Загрузить справочник стран, регионов, городов отправления и операторов. Вызови этот инструмент первым перед любым поиском.",
                     inputSchema={
                         "type": "object",
-                        "properties": {},
+                        "properties": {
+                            "force_reload": {
+                                "type": "boolean",
+                                "description": "Принудительно загрузить из API вместо локального файла",
+                                "default": False
+                            }
+                        },
                         "required": []
                     }
                 ),
@@ -189,7 +210,8 @@ class EtoTravelMCP:
         async def call_tool(name: str, arguments: Any) -> List[TextContent]:
             try:
                 if name == "load_dictionary":
-                    result = await self.load_dictionary()
+                    force_reload = arguments.get("force_reload", False) if arguments else False
+                    result = await self.load_dictionary(force_reload=force_reload)
                 elif name == "search_tours":
                     result = await self.search_tours(**arguments)
                 elif name == "get_hotel_types":
@@ -221,8 +243,29 @@ class EtoTravelMCP:
         if not self.session:
             self.session = "0e56548e3e4ed302e692f3afc717a163324fe9526f01957108cfe5b656cbbe413ef653bcc317e817c0c4687a2b0536611942eeb3ebbe6bced2264ba434f462a787f83474aa5e2122f03b098cc16f285f024ade46527e24c1542eaa89605d5399ca6a71e337332188e0ad327a9738fa62a5e42c872dc03236bf38e1113686190d38812c51c49a21b662fe9351ad"
     
-    async def load_dictionary(self) -> Dict[str, Any]:
-        """Загрузить справочник стран, регионов и городов"""
+    def _load_dictionary_from_file(self) -> Optional[Dict[str, Any]]:
+        """Загрузить справочник из локального файла"""
+        try:
+            if not self.dictionary_path.exists():
+                logger.warning(f"📁 Файл справочника не найден: {self.dictionary_path}")
+                return None
+            
+            logger.info(f"📖 Загрузка справочника из файла: {self.dictionary_path}")
+            with open(self.dictionary_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            logger.info("✅ Справочник загружен из файла")
+            return data
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Ошибка парсинга JSON: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка чтения файла: {e}")
+            return None
+    
+    async def _load_dictionary_from_api(self) -> Optional[Dict[str, Any]]:
+        """Загрузить справочник из API"""
         await self.ensure_session()
         
         params = {
@@ -239,25 +282,91 @@ class EtoTravelMCP:
         url = f"{BASE_URL}/xml/listdev.php?{urlencode(params)}"
         
         try:
+            logger.info("🌐 Загрузка справочника из API...")
             response = await self.http_client.get(url)
             response.raise_for_status()
-            self.dictionary = response.json()
+            data = response.json()
             
+            logger.info("✅ Справочник загружен из API")
+            
+            # Сохраняем в файл для будущего использования
+            try:
+                with open(self.dictionary_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                logger.info(f"💾 Справочник сохранён в файл: {self.dictionary_path}")
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось сохранить справочник в файл: {e}")
+            
+            return data
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки из API: {e}")
+            return None
+    
+    async def load_dictionary(self, force_reload: bool = False) -> Dict[str, Any]:
+        """Загрузить справочник стран, регионов и городов
+        
+        Args:
+            force_reload: Принудительно загрузить из API вместо файла
+        """
+        # Если справочник уже загружен и не требуется перезагрузка
+        if self.dictionary and not force_reload:
             stats = {
                 "countries_count": len(self.dictionary.get("lists", {}).get("allcountry", {}).get("country", [])),
                 "departures_count": len(self.dictionary.get("lists", {}).get("departures", {}).get("departure", [])),
                 "regions_count": len(self.dictionary.get("lists", {}).get("regions", {}).get("region", [])),
-                "loaded": True
+                "loaded": True,
+                "source": "cache"
             }
-            
             return {
                 "success": True,
-                "message": "Справочник успешно загружен",
+                "message": "Справочник уже загружен (используется кэш)",
                 "stats": stats
             }
-        except Exception as e:
-            logger.error(f"Error loading dictionary: {str(e)}")
-            return {"success": False, "error": str(e)}
+        
+        # Пытаемся загрузить из файла (если не требуется принудительная перезагрузка)
+        if not force_reload:
+            data = self._load_dictionary_from_file()
+            if data:
+                self.dictionary = data
+                source = "file"
+            else:
+                # Fallback на API
+                data = await self._load_dictionary_from_api()
+                if data:
+                    self.dictionary = data
+                    source = "api"
+                else:
+                    return {
+                        "success": False,
+                        "error": "Не удалось загрузить справочник ни из файла, ни из API"
+                    }
+        else:
+            # Принудительная загрузка из API
+            data = await self._load_dictionary_from_api()
+            if data:
+                self.dictionary = data
+                source = "api_forced"
+            else:
+                return {
+                    "success": False,
+                    "error": "Не удалось загрузить справочник из API"
+                }
+        
+        # Подготовим статистику
+        stats = {
+            "countries_count": len(self.dictionary.get("lists", {}).get("allcountry", {}).get("country", [])),
+            "departures_count": len(self.dictionary.get("lists", {}).get("departures", {}).get("departure", [])),
+            "regions_count": len(self.dictionary.get("lists", {}).get("regions", {}).get("region", [])),
+            "loaded": True,
+            "source": source
+        }
+        
+        return {
+            "success": True,
+            "message": f"Справочник успешно загружен из {source}",
+            "stats": stats
+        }
     
     async def get_hotel_types(self, country_id: int) -> Dict[str, Any]:
         """Получить типы отелей для страны"""
@@ -518,6 +627,7 @@ async def test_mode():
     result = await mcp.load_dictionary()
     if result.get("success"):
         print(f"✅ Успешно! Загружено:")
+        print(f"   - Источник: {result['stats']['source']}")
         print(f"   - Стран: {result['stats']['countries_count']}")
         print(f"   - Городов вылета: {result['stats']['departures_count']}")
         print(f"   - Регионов: {result['stats']['regions_count']}")
