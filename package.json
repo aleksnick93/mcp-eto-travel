@@ -1,0 +1,12 @@
+{
+    "name": "mcp-eto-travel",
+    "version": "1.0.0",
+    "description": "MCP server for searching tours on eto.travel",
+    "main": "mcp_server.py",
+    "scripts": {
+      "start": "python mcp_server.py"
+    },
+    "keywords": ["mcp", "travel", "tours", "eto.travel"],
+    "author": "Alexandr Okhtienko",
+    "license": "MIT"
+  }

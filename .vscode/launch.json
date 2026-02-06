@@ -6,7 +6,7 @@
             "name": "MCP Server (FastMCP)",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/main.py", // Или main.py, если файл так называется
+            "program": "${workspaceFolder}/mcp_server.py",
             "console": "integratedTerminal",
             "justMyCode": true,
             "env": {
