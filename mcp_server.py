@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+import sys
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 
@@ -22,6 +23,7 @@ BASE_URL = "https://tourvisor.ru"
 API_URL = "https://tourvisor.ru/api/v1.1"
 SEARCH_URL = "https://search3.tourvisor.ru"
 REFERRER = "https://eto.travel/search/"
+
 
 class EtoTravelMCP:
     """MCP сервер для работы с eto.travel API"""
@@ -217,7 +219,6 @@ class EtoTravelMCP:
     async def ensure_session(self):
         """Получить session ID если его нет"""
         if not self.session:
-            # Генерируем фиктивную сессию или получаем через первый запрос
             self.session = "0e56548e3e4ed302e692f3afc717a163324fe9526f01957108cfe5b656cbbe413ef653bcc317e817c0c4687a2b0536611942eeb3ebbe6bced2264ba434f462a787f83474aa5e2122f03b098cc16f285f024ade46527e24c1542eaa89605d5399ca6a71e337332188e0ad327a9738fa62a5e42c872dc03236bf38e1113686190d38812c51c49a21b662fe9351ad"
     
     async def load_dictionary(self) -> Dict[str, Any]:
@@ -242,7 +243,6 @@ class EtoTravelMCP:
             response.raise_for_status()
             self.dictionary = response.json()
             
-            # Подготовим удобную статистику
             stats = {
                 "countries_count": len(self.dictionary.get("lists", {}).get("allcountry", {}).get("country", [])),
                 "departures_count": len(self.dictionary.get("lists", {}).get("departures", {}).get("departure", [])),
@@ -253,8 +253,7 @@ class EtoTravelMCP:
             return {
                 "success": True,
                 "message": "Справочник успешно загружен",
-                "stats": stats,
-                "dictionary": self.dictionary
+                "stats": stats
             }
         except Exception as e:
             logger.error(f"Error loading dictionary: {str(e)}")
@@ -307,7 +306,7 @@ class EtoTravelMCP:
             return {
                 "success": True,
                 "hotels_count": len(hotels),
-                "hotels": hotels[:100]  # Ограничим первыми 100 для ответа
+                "hotels": hotels[:100]
             }
         except Exception as e:
             logger.error(f"Error getting hotels: {str(e)}")
@@ -329,7 +328,6 @@ class EtoTravelMCP:
         """Поиск туров"""
         await self.ensure_session()
         
-        # Формируем параметры поиска
         search_params = {
             "ts_dosearch": "1",
             "s_form_mode": "0",
@@ -353,18 +351,15 @@ class EtoTravelMCP:
         if hotel_ids:
             search_params["s_hotels"] = ",".join(map(str, hotel_ids))
         
-        # Инициируем поиск
         search_url = f"https://eto.travel/search/?{urlencode(search_params)}"
         
         try:
-            # Первый запрос для получения request_id
             response = await self.http_client.get(
                 search_url,
                 follow_redirects=True,
                 headers={"User-Agent": "Mozilla/5.0"}
             )
             
-            # Извлекаем request_id из ответа
             request_id = await self._extract_request_id(response.text)
             
             if not request_id:
@@ -374,14 +369,13 @@ class EtoTravelMCP:
                     "search_url": search_url
                 }
             
-            # Long polling для получения результатов
             tours = await self._poll_search_results(request_id)
             
             return {
                 "success": True,
                 "request_id": request_id,
                 "tours_count": len(tours),
-                "tours": tours[:50],  # Первые 50 туров
+                "tours": tours[:50],
                 "search_url": search_url
             }
             
@@ -391,8 +385,8 @@ class EtoTravelMCP:
     
     async def _extract_request_id(self, html: str) -> Optional[str]:
         """Извлечь request_id из HTML ответа"""
-        # Используем сырую строку для regex
-        match = re.search(r'requestid["\']?\\s*[:=]\\s*["\']?(\\d+)', html)
+        pattern = r'requestid["\']?\s*[:=]\s*["\']?(\d+)'
+        match = re.search(pattern, html)
         if match:
             return match.group(1)
         return None
@@ -419,7 +413,6 @@ class EtoTravelMCP:
                 response.raise_for_status()
                 data = response.json()
                 
-                # Обрабатываем блоки с турами
                 blocks = data.get("data", {}).get("block", [])
                 
                 if not blocks:
@@ -436,11 +429,9 @@ class EtoTravelMCP:
                             tour["hotel_price"] = hotel.get("price")
                             all_tours.append(tour)
                 
-                # Если получили финальный флаг, завершаем
                 if data.get("data", {}).get("final"):
                     break
                 
-                # Небольшая задержка перед следующим запросом
                 await asyncio.sleep(1)
                 
             except Exception as e:
@@ -513,10 +504,79 @@ class EtoTravelMCP:
                 self.server.create_initialization_options()
             )
 
+
+# Тестовый режим
+async def test_mode():
+    """Тестовый режим для проверки работоспособности без MCP клиента"""
+    print("🧪 Тестовый режим MCP сервера")
+    print("=" * 60)
+    
+    mcp = EtoTravelMCP()
+    
+    # Тест 1: Загрузка справочника
+    print("\n1️⃣ Тест: Загрузка справочника...")
+    result = await mcp.load_dictionary()
+    if result.get("success"):
+        print(f"✅ Успешно! Загружено:")
+        print(f"   - Стран: {result['stats']['countries_count']}")
+        print(f"   - Городов вылета: {result['stats']['departures_count']}")
+        print(f"   - Регионов: {result['stats']['regions_count']}")
+    else:
+        print(f"❌ Ошибка: {result.get('error')}")
+    
+    # Тест 2: Поиск страны
+    print("\n2️⃣ Тест: Поиск страны 'Египет'...")
+    result = await mcp.find_country("Египет")
+    if result.get("success") and result.get("found_count") > 0:
+        country = result["countries"][0]
+        print(f"✅ Найдено! ID: {country['id']}, Название: {country['name']}")
+    else:
+        print(f"❌ Не найдено")
+    
+    # Тест 3: Популярные страны
+    print("\n3️⃣ Тест: Получение популярных стран...")
+    result = await mcp.get_popular_countries()
+    if result.get("success"):
+        print(f"✅ Успешно! Найдено {result['popular_count']} популярных стран:")
+        for country in result["countries"][:5]:
+            print(f"   - {country['name']} (ID: {country['id']})")
+    else:
+        print(f"❌ Ошибка")
+    
+    # Тест 4: Типы отелей
+    print("\n4️⃣ Тест: Получение типов отелей для Египта...")
+    result = await mcp.get_hotel_types(1)  # 1 = Египет
+    if result.get("success"):
+        print(f"✅ Успешно! Доступные типы:")
+        for hotel_type in result.get("hotel_types", [])[:5]:
+            print(f"   - {hotel_type['name']} (ID: {hotel_type['id']})")
+    else:
+        print(f"❌ Ошибка: {result.get('error')}")
+    
+    print("\n" + "=" * 60)
+    print("✨ Все тесты завершены!")
+    print("\n💡 Для запуска в MCP режиме:")
+    print("   python mcp_server.py")
+    print("\n💡 И подключи к Cursor через настройки MCP")
+    
+    await mcp.http_client.aclose()
+
+
 async def main():
     """Главная функция"""
-    mcp = EtoTravelMCP()
-    await mcp.run()
+    # Проверяем режим запуска
+    if len(sys.argv) > 1 and sys.argv[1] == "--test":
+        # Тестовый режим
+        await test_mode()
+    else:
+        # Обычный MCP режим
+        logger.info("🚀 Запуск MCP сервера...")
+        logger.info("📡 Ожидание подключения от Cursor/Claude...")
+        logger.info("💡 Для тестирования используй: python mcp_server.py --test")
+        
+        mcp = EtoTravelMCP()
+        await mcp.run()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
